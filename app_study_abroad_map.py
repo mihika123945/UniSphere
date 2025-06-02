@@ -1,20 +1,23 @@
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
-import requests
+from together import Together
 from dotenv import load_dotenv
 import os
-load_dotenv()
-
-api_key = os.getenv("api_key")
+import streamlit.components.v1 as components
+import markdown2
 
 # Set up the Streamlit page
 st.set_page_config(page_title="Study Abroad University Map", layout="wide")
 
+# Load API key
+load_dotenv()
+together_api_key = os.getenv("together_api_key")
+
 # Load and cache data
 @st.cache_data
 def load_data():
-    df = pd.read_csv("merged_data_with_coordinates.csv")
+    df = pd.read_csv("data/merged_data_with_coordinates.csv")
     df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
     df["annual_living_cost"] = df["avg_monthly_cost_usd"] * 9
     df["total_estimated_cost"] = df["latest.cost.tuition.out_of_state"] + df["annual_living_cost"]
@@ -25,19 +28,15 @@ df = load_data()
 # Layout: split full screen into 2 columns
 col1, col2 = st.columns([7, 3])  # 70% for filters/map, 30% for chatbot
 
+# --- LEFT SIDE (MAP + FILTERS) ---
 with col1:
-    # Title and instructions
     st.title("\U0001F30F Study Abroad: U.S. University Explorer")
     st.markdown("Explore U.S. universities by total estimated cost. Adjust filters and click 'Apply Filters' to update the map.")
 
-    # Budget range
     max_budget = int(df["total_estimated_cost"].dropna().max())
-
-    # Additional filters setup
     states = sorted(df["school.state"].dropna().unique())
     min_size, max_size = int(df["latest.student.size"].min()), int(df["latest.student.size"].max())
 
-    # Create form for filters
     with st.form("filter_form"):
         selected_state = st.selectbox("Filter by State:", ["All"] + states)
         keyword = st.text_input("Search by Program (e.g., Data Science):", "")
@@ -71,9 +70,16 @@ with col1:
             avg_lon = -95.7129
             zoom_level = 3
 
-        tooltip = {
-            "text": "{school.name}\n{school.city}, {school.state}\nTotal: ${total_estimated_cost}"
-        }
+        tooltip = pdk.Tooltip(
+            html="""
+                <b>{school.name}</b><br/>
+                {school.city}, {school.state}<br/>
+                Tuition: ${latest.cost.tuition.out_of_state}<br/>
+                Total: ${total_estimated_cost}
+            """,
+            style={"backgroundColor": "white", "color": "black"},
+            anchor="top"
+        )
 
         state_layer = None
         if selected_state != "All":
@@ -126,65 +132,54 @@ with col1:
 
         st.markdown(f"Showing {len(filtered_df)} universities under ${budget:,} total estimated cost.")
 
+# --- RIGHT SIDE (CHATBOT + INPUT) ---
 with col2:
     st.markdown("## 💬 Chat with Study Abroad Bot")
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    with st.container():
-        chat_container = st.container()
-        with chat_container:
-            # Apply scroll styling to the chat section
-            st.markdown("""
-                <style>
-                    div[data-testid="stVerticalBlock"] > div:first-child {
-                        max-height: 550px;
-                        overflow-y: auto;
-                        padding-right: 5px;
-                    }
-                </style>
-            """, unsafe_allow_html=True)
+    with st.form("chat_input_form", clear_on_submit=True):
+        user_msg = st.text_input("Type your question here...", key="custom_input")
+        submitted = st.form_submit_button("➤")
 
-            for msg in st.session_state.chat_history:
-                role = msg["role"]
-                content = msg["content"]
+        if submitted and user_msg:
+            st.session_state.chat_history.append({"role": "user", "content": user_msg})
 
-                if role == "user":
-                    st.markdown(f"""
-                        <div style="text-align: right; margin: 8px 0;">
-                            <span style="display: inline-block; background-color: #DCF8C6; color: #000; padding: 8px 12px; border-radius: 15px; max-width: 80%;">{content}</span>
-                        </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                        <div style="text-align: left; margin: 8px 0;">
-                            <span style="display: inline-block; background-color: #F1F0F0; color: #000; padding: 8px 12px; border-radius: 15px; max-width: 80%;">{content}</span>
-                        </div>
-                    """, unsafe_allow_html=True)
+            client = Together(api_key=together_api_key)
+            try:
+                response = client.chat.completions.create(
+                    model="deepseek-ai/DeepSeek-V3",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant for international students."}
+                    ] + st.session_state.chat_history,
+                    max_tokens=2048,
+                    temperature=0.7
+                )
+                reply = response.choices[0].message.content
+            except Exception as e:
+                reply = f"⚠️ API error: {e}"
 
-    user_msg = st.chat_input("Type your question here...")
+            st.session_state.chat_history.append({"role": "assistant", "content": reply})
 
-    if user_msg:
-        st.session_state.chat_history.append({"role": "user", "content": user_msg})
+    chat_html = """
+    <div style='max-height: 400px; overflow-y: auto; padding: 10px; border: 1px solid #ddd; border-radius: 10px; background-color: #fff;'>
+    """
+    for i in range(0, len(st.session_state.chat_history), 2):
+        if i < len(st.session_state.chat_history):
+            user = markdown2.markdown(st.session_state.chat_history[i]["content"])
+            chat_html += f"""
+            <div style='text-align: right; margin: 8px 0;'>
+                <span style='background-color: #DCF8C6; padding: 8px 12px; border-radius: 15px; display: inline-block; max-width: 80%;'>{user}</span>
+            </div>
+            """
+        if i + 1 < len(st.session_state.chat_history):
+            bot = markdown2.markdown(st.session_state.chat_history[i+1]["content"])
+            chat_html += f"""
+            <div style='text-align: left; margin: 8px 0;'>
+                <span style='background-color: #F1F0F0; padding: 8px 12px; border-radius: 15px; display: inline-block; max-width: 80%;'>{bot}</span>
+            </div>
+            """
+    chat_html += "</div>"
 
-        api_key = api_key
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "model": "openai/gpt-3.5-turbo",
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant for international students studying in the USA."}
-            ] + st.session_state.chat_history
-        }
-
-        try:
-            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-            reply = res.json()["choices"][0]["message"]["content"]
-        except Exception:
-            reply = "⚠️ Could not get a response. Try again."
-
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+    components.html(chat_html, height=420, scrolling=True)
